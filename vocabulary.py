@@ -6,6 +6,9 @@ class Voc:
         self.word2count = {}
         self.index2word = {PAD_token: "PAD", SOS_token: "SOS", EOS_token: "EOS"}
         self.num_words = 3
+        self.PAD_token = PAD_token
+        self.SOS_token = SOS_token
+        self.EOS_token = EOS_token
 
     def addWord(self, word):
         if word not in self.word2index:

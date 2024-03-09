@@ -3,24 +3,21 @@ import itertools
 import torch
 import unicodedata
 import re
+from nltk.translate.bleu_score import corpus_bleu
+import nltk
+nltk.download('punkt')
+from nltk.translate.bleu_score import sentence_bleu
 PAD_token = 0
 SOS_token = 1
 EOS_token = 2
 
 def unicodeToAscii(s):
-    """
-    Converts the Unicode string to plain ASCII.
-    """
     return ''.join(
         c for c in unicodedata.normalize('NFD', s)
         if unicodedata.category(c) != 'Mn'
     )
 
 def normalizeString(s):
-    """
-    Lowercase, trim, replace ellipses with a single full stop, 
-    and remove non-letter characters except for basic punctuation.
-    """
     # Convert to ASCII
     s = unicodeToAscii(s.lower().strip()) 
     # Replace ellipses with a single full stop
@@ -200,27 +197,44 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, encode
 
     return sum(print_losses), n_totals
 
-def validate(encoder, decoder, batch_size, input_variable, lengths, target_variable, mask, max_target_len):
+def validate(encoder, decoder, voc, validation_pairs, batch_size):
     with torch.no_grad():  # No gradients needed for validation
-        loss = 0
+        validation_loss = 0
         print_losses = []
         n_totals = 0
-
-        encoder_outputs, encoder_hidden = encoder(input_variable, lengths, None)
-        decoder_input = torch.LongTensor([[SOS_token for _ in range(batch_size)]])
-        decoder_hidden = encoder_hidden[:decoder.n_layers]
-
-        for t in range(max_target_len):
-            decoder_output, decoder_hidden, _ = decoder(decoder_input, decoder_hidden, encoder_outputs)
-            _, topi = decoder_output.topk(1)
-            decoder_input = torch.LongTensor([[topi[i][0] for i in range(batch_size)]])
-
-            mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[t], mask[t])
-            loss += mask_loss
-            print_losses.append(mask_loss.item() * nTotal)
-            n_totals += nTotal
-
-        return sum(print_losses) / n_totals
+        bleu_score_accum = 0.0
+        
+        for i in range(0, len(validation_pairs)//batch_size, batch_size):
+            validation_batch = validation_pairs[i:i + batch_size]
+            input_variable, lengths, target_variable, mask, max_target_len = batch2TrainData(voc, validation_batch)
+            batch_size_actual = input_variable.size(1)
+            
+            encoder_outputs, encoder_hidden = encoder(input_variable, lengths, None)
+            decoder_input = torch.LongTensor([[SOS_token for _ in range(batch_size_actual)]])
+            decoder_hidden = encoder_hidden[:decoder.n_layers]
+            
+            all_tokens = torch.zeros([0], dtype=torch.long)
+            for t in range(max_target_len):
+                decoder_output, decoder_hidden, _ = decoder(decoder_input, decoder_hidden, encoder_outputs)
+                _, topi = decoder_output.topk(1)
+                all_tokens = torch.cat((all_tokens, topi), dim=0)
+                decoder_input = torch.LongTensor([[topi[i][0] for i in range(batch_size_actual)]])
+                mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[t], mask[t])
+                validation_loss += mask_loss
+                print_losses.append(mask_loss.item() * nTotal)
+                n_totals += nTotal
+            
+            # Convert tokens to words
+            decoded_words = [voc.index2word[token.item()] for token in all_tokens]
+            
+            # Calculate BLEU score
+            for j in range(batch_size_actual):
+                reference = validation_pairs[i + j][1].split(' ')
+                hypothesis = decoded_words[j]
+                bleu_score_accum += sentence_bleu([reference], hypothesis, weights=(0.5, 0.5, 0, 0))
+    
+        avg_bleu_score = bleu_score_accum / len(validation_pairs)
+        return validation_loss, n_totals, avg_bleu_score
     
 def evaluate(encoder, decoder, searcher, voc, sentence, max_length=10):
     ### Format input sentence as a batch
@@ -232,22 +246,11 @@ def evaluate(encoder, decoder, searcher, voc, sentence, max_length=10):
     input_batch = torch.LongTensor(indexes_batch).transpose(0, 1)
     
     # Decode sentence with searcher
-    tokens, scores = searcher(input_batch, lengths, max_length)
+    tokens, scores = searcher(input_batch, lengths, max_length, SOS_token)
     decoded_words = [voc.index2word[token.item()] for token in tokens]
     return decoded_words
 
 def calculate_distinct_n_grams(sentences, n=1):
-    """
-    Calculate Distinct-N metric for a list of sentences.
-    
-    Parameters:
-    - sentences: list of strings, where each string is a generated response or sentence.
-    - n: integer, the n-gram length (1 for unigrams, 2 for bigrams, etc.)
-    
-    Returns:
-    - distinct_n: The distinct-N metric, calculated as the number of unique n-grams
-                  divided by the total number of n-grams.
-    """
     # Tokenize the sentences into lists of words
     tokens_list = [sentence.split() for sentence in sentences]
     
