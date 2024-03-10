@@ -144,7 +144,6 @@ def maskNLLLoss(inp, target, mask):
     loss = crossEntropy.masked_select(mask).mean()
     return loss, nTotal.item()
 
-
 def train(input_variable, lengths, target_variable, mask, max_target_len, encoder, decoder, encoder_optimizer, decoder_optimizer, batch_size, clip, teacher_forcing_ratio):
     encoder_optimizer.zero_grad()
     decoder_optimizer.zero_grad()
