@@ -3,10 +3,6 @@ import itertools
 import torch
 import unicodedata
 import re
-from nltk.translate.bleu_score import corpus_bleu
-import nltk
-nltk.download('punkt')
-from nltk.translate.bleu_score import sentence_bleu
 PAD_token = 0
 SOS_token = 1
 EOS_token = 2
@@ -197,47 +193,29 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, encode
 
     return sum(print_losses), n_totals
 
-def validate(encoder, decoder, voc, validation_pairs, batch_size):
+def validate(encoder, decoder, batch_size, input_variable, lengths, target_variable, mask, max_target_len):
     with torch.no_grad():  # No gradients needed for validation
-        validation_loss = 0
+        loss = 0
         print_losses = []
         n_totals = 0
-        bleu_score_accum = 0.0
-        
-        for i in range(0, len(validation_pairs)//batch_size, batch_size):
-            validation_batch = validation_pairs[i:i + batch_size]
-            input_variable, lengths, target_variable, mask, max_target_len = batch2TrainData(voc, validation_batch)
-            batch_size_actual = input_variable.size(1)
-            
-            encoder_outputs, encoder_hidden = encoder(input_variable, lengths, None)
-            decoder_input = torch.LongTensor([[SOS_token for _ in range(batch_size_actual)]])
-            decoder_hidden = encoder_hidden[:decoder.n_layers]
-            
-            all_tokens = torch.zeros([0], dtype=torch.long)
-            for t in range(max_target_len):
-                decoder_output, decoder_hidden, _ = decoder(decoder_input, decoder_hidden, encoder_outputs)
-                _, topi = decoder_output.topk(1)
-                all_tokens = torch.cat((all_tokens, topi), dim=0)
-                decoder_input = torch.LongTensor([[topi[i][0] for i in range(batch_size_actual)]])
-                mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[t], mask[t])
-                validation_loss += mask_loss
-                print_losses.append(mask_loss.item() * nTotal)
-                n_totals += nTotal
-            
-            # Convert tokens to words
-            decoded_words = [voc.index2word[token.item()] for token in all_tokens]
-            
-            # Calculate BLEU score
-            for j in range(batch_size_actual):
-                reference = validation_pairs[i + j][1].split(' ')
-                hypothesis = decoded_words[j]
-                bleu_score_accum += sentence_bleu([reference], hypothesis, weights=(0.5, 0.5, 0, 0))
-    
-        avg_bleu_score = bleu_score_accum / len(validation_pairs)
-        return validation_loss, n_totals, avg_bleu_score
+
+        encoder_outputs, encoder_hidden = encoder(input_variable, lengths, None)
+        decoder_input = torch.LongTensor([[SOS_token for _ in range(batch_size)]])
+        decoder_hidden = encoder_hidden[:decoder.n_layers]
+
+        for t in range(max_target_len):
+            decoder_output, decoder_hidden, _ = decoder(decoder_input, decoder_hidden, encoder_outputs)
+            _, topi = decoder_output.topk(1)
+            decoder_input = torch.LongTensor([[topi[i][0] for i in range(batch_size)]])
+
+            mask_loss, nTotal = maskNLLLoss(decoder_output, target_variable[t], mask[t])
+            loss += mask_loss
+            print_losses.append(mask_loss.item() * nTotal)
+            n_totals += nTotal
+
+        return sum(print_losses), n_totals
     
 def evaluate(encoder, decoder, searcher, voc, sentence, max_length=10):
-    ### Format input sentence as a batch
     # words -> indexes
     indexes_batch = [indexesFromSentence(voc, sentence)]
     # Create lengths tensor
@@ -248,6 +226,12 @@ def evaluate(encoder, decoder, searcher, voc, sentence, max_length=10):
     # Decode sentence with searcher
     tokens, scores = searcher(input_batch, lengths, max_length, SOS_token)
     decoded_words = [voc.index2word[token.item()] for token in tokens]
+
+    # Remove EOS token from end of sentence
+    for i in range(len(decoded_words)):
+        if decoded_words[i] == 'EOS':
+            decoded_words = decoded_words[:i]
+            break
     return decoded_words
 
 def calculate_distinct_n_grams(sentences, n=1):
@@ -264,3 +248,24 @@ def calculate_distinct_n_grams(sentences, n=1):
     # Calculate distinct-N metric
     distinct_n = unique_n_grams / total_n_grams if total_n_grams > 0 else 0
     return distinct_n
+
+def calculate_f1(predicted, target):
+    # Tokenize the sentences if not already tokenized
+    predicted_tokens = predicted.split() if isinstance(predicted, str) else predicted
+    target_tokens = target.split() if isinstance(target, str) else target
+    
+    # Calculate True Positives (TP), False Positives (FP), and False Negatives (FN)
+    TP = sum(pred == targ for pred, targ in zip(predicted_tokens, target_tokens))
+    FP = max(len(predicted_tokens) - TP, 0)
+    FN = max(len(target_tokens) - TP, 0)
+    
+    # Calculate Precision and Recall
+    precision = TP / (TP + FP) if TP + FP > 0 else 0
+    recall = TP / (TP + FN) if TP + FN > 0 else 0
+    
+    # Calculate F1 Score
+    if precision + recall > 0:
+        f1 = 2 * (precision * recall) / (precision + recall)
+    else:
+        f1 = 0
+    return f1
